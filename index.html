@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>말로 입력하기</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #6b7280;
+    --border: #d9dde4; --accent: #2563eb; --accent-text: #ffffff;
+    --rec: #dc2626; --interim: #9ca3af; --ok: #16a34a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b1f27; --text: #e5e7eb; --muted: #9ca3af;
+      --border: #2e3440; --accent: #3b82f6; --accent-text: #ffffff;
+      --rec: #ef4444; --interim: #6b7280; --ok: #22c55e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    line-height: 1.5;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 16px;
+  }
+  .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  #mic {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: 1.1rem; font-weight: 600; padding: 14px 22px;
+    border: none; border-radius: 999px; cursor: pointer;
+    background: var(--accent); color: var(--accent-text);
+  }
+  #mic.recording { background: var(--rec); }
+  #mic:disabled { opacity: .5; cursor: not-allowed; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: currentColor; }
+  #mic.recording .dot { animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .2; } }
+  select {
+    font: inherit; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+  }
+  #status { color: var(--muted); font-size: .95rem; min-height: 1.5em; margin: 0 0 10px; }
+  #status.error { color: var(--rec); }
+  #status.ok { color: var(--ok); }
+  textarea {
+    width: 100%; min-height: 260px; resize: vertical;
+    font: inherit; font-size: 1.1rem; padding: 12px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg); color: var(--text);
+  }
+  #interim { color: var(--interim); font-style: italic; min-height: 1.5em; margin: 8px 2px 0; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .actions button {
+    font: inherit; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+  }
+  .actions button:hover { border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: .85rem; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎤 말로 입력하기</h1>
+  <p class="sub">마이크 버튼을 누르고 말하면 글자로 바뀝니다.</p>
+
+  <div class="card">
+    <div class="controls">
+      <button id="mic" type="button"><span class="dot"></span><span id="micLabel">말하기 시작</span></button>
+      <label>언어
+        <select id="lang">
+          <option value="ko-KR">한국어</option>
+          <option value="en-US">English</option>
+          <option value="ja-JP">日本語</option>
+        </select>
+      </label>
+    </div>
+    <p id="status" role="status"></p>
+    <textarea id="text" placeholder="여기에 말한 내용이 적힙니다. 직접 고칠 수도 있어요."></textarea>
+    <div id="interim" aria-live="polite"></div>
+    <div class="actions">
+      <button id="copy" type="button">📋 복사</button>
+      <button id="save" type="button">💾 .txt 저장</button>
+      <button id="clear" type="button">🗑️ 지우기</button>
+    </div>
+  </div>
+
+  <p class="hint">Chrome, Edge, Safari에서 동작합니다. 처음 사용할 때 마이크 권한을 허용해 주세요.
+  인터넷 주소는 https:// 이거나 내 컴퓨터(localhost)여야 합니다.</p>
+</main>
+
+<script>
+(function () {
+  var STORE_KEY = 'voice-input-text';
+  var mic = document.getElementById('mic');
+  var micLabel = document.getElementById('micLabel');
+  var langSel = document.getElementById('lang');
+  var statusEl = document.getElementById('status');
+  var textEl = document.getElementById('text');
+  var interimEl = document.getElementById('interim');
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg || '';
+    statusEl.className = kind || '';
+  }
+
+  // 저장된 글 불러오기
+  try { textEl.value = localStorage.getItem(STORE_KEY) || ''; } catch (e) {}
+  function persist() { try { localStorage.setItem(STORE_KEY, textEl.value); } catch (e) {} }
+  textEl.addEventListener('input', persist);
+
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    mic.disabled = true;
+    setStatus('이 브라우저는 음성 인식을 지원하지 않아요. Chrome, Edge 또는 Safari를 사용해 주세요.', 'error');
+  }
+
+  var recognition = null;
+  var wantRecording = false;
+
+  function appendFinal(chunk) {
+    chunk = chunk.trim();
+    if (!chunk) return;
+    var cur = textEl.value;
+    var sep = cur && !/\s$/.test(cur) ? ' ' : '';
+    textEl.value = cur + sep + chunk;
+    textEl.scrollTop = textEl.scrollHeight;
+    persist();
+  }
+
+  function updateUI() {
+    mic.classList.toggle('recording', wantRecording);
+    micLabel.textContent = wantRecording ? '멈추기' : '말하기 시작';
+    langSel.disabled = wantRecording;
+  }
+
+  function createRecognition() {
+    var r = new SR();
+    r.lang = langSel.value;
+    r.continuous = true;
+    r.interimResults = true;
+
+    r.onstart = function () { setStatus('듣고 있어요… 말씀하세요.', 'ok'); };
+
+    r.onresult = function (event) {
+      var interim = '';
+      for (var i = event.resultIndex; i < event.results.length; i++) {
+        var res = event.results[i];
+        if (res.isFinal) appendFinal(res[0].transcript);
+        else interim += res[0].transcript;
+      }
+      interimEl.textContent = interim;
+    };
+
+    r.onerror = function (event) {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        wantRecording = false;
+        setStatus('마이크 권한이 거부됐어요. 주소창 옆 자물쇠 아이콘에서 마이크를 허용해 주세요.', 'error');
+      } else if (event.error === 'no-speech') {
+        setStatus('소리가 들리지 않아요. 계속 듣고 있어요.', '');
+      } else if (event.error === 'audio-capture') {
+        wantRecording = false;
+        setStatus('마이크를 찾을 수 없어요. 마이크가 연결돼 있는지 확인해 주세요.', 'error');
+      } else if (event.error === 'network') {
+        wantRecording = false;
+        setStatus('네트워크 오류가 났어요. 인터넷 연결을 확인해 주세요.', 'error');
+      } else if (event.error !== 'aborted') {
+        setStatus('오류: ' + event.error, 'error');
+      }
+      updateUI();
+    };
+
+    r.onend = function () {
+      interimEl.textContent = '';
+      if (wantRecording) {
+        // 브라우저가 잠시 후 저절로 끊는 경우 다시 시작
+        try { r.start(); return; } catch (e) {}
+      }
+      wantRecording = false;
+      updateUI();
+      if (statusEl.className !== 'error') setStatus('멈췄어요.', '');
+    };
+    return r;
+  }
+
+  mic.addEventListener('click', function () {
+    if (!SR) return;
+    if (wantRecording) {
+      wantRecording = false;
+      if (recognition) recognition.stop();
+      updateUI();
+      return;
+    }
+    wantRecording = true;
+    recognition = createRecognition();
+    try {
+      recognition.start();
+    } catch (e) {
+      wantRecording = false;
+      setStatus('시작하지 못했어요: ' + e.message, 'error');
+    }
+    updateUI();
+  });
+
+  document.getElementById('copy').addEventListener('click', function () {
+    var txt = textEl.value;
+    if (!txt) { setStatus('복사할 내용이 없어요.', ''); return; }
+    var done = function () { setStatus('복사했어요!', 'ok'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(done, function () {
+        textEl.select(); document.execCommand('copy'); done();
+      });
+    } else {
+      textEl.select(); document.execCommand('copy'); done();
+    }
+  });
+
+  document.getElementById('save').addEventListener('click', function () {
+    var txt = textEl.value;
+    if (!txt) { setStatus('저장할 내용이 없어요.', ''); return; }
+    var blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+    var a = document.createElement('a');
+    var d = new Date();
+    var pad = function (n) { return String(n).padStart(2, '0'); };
+    a.href = URL.createObjectURL(blob);
+    a.download = '말로입력_' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+      '_' + pad(d.getHours()) + pad(d.getMinutes()) + '.txt';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    setStatus('파일로 저장했어요.', 'ok');
+  });
+
+  document.getElementById('clear').addEventListener('click', function () {
+    if (textEl.value && !confirm('적힌 내용을 모두 지울까요?')) return;
+    textEl.value = '';
+    interimEl.textContent = '';
+    persist();
+    setStatus('지웠어요.', '');
+  });
+})();
+</script>
+</body>
+</html>
